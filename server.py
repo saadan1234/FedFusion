@@ -8,20 +8,23 @@ from task import load_model
 
 # Define metric aggregation function
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
+    print("Entering Averaging Function")
     # Multiply accuracy of each client by number of examples used
     accuracies = [num_examples * m["accuracy"] for num_examples, m in metrics]
     examples = [num_examples for num_examples, _ in metrics]
-
+    print(f"Averaging Function: Accuracies: {type(accuracies)} \nLength: {len(accuracies)}")
+    print(f"Averaging Function: Parameters: {type(examples)} \nLength: {len(examples)}")
     # Aggregate and return custom metric (weighted average)
+    print(f"Averaging Function: Metrics: {type(metrics)} \nLength: {len(metrics)}")
     return {"accuracy": sum(accuracies) / sum(examples)}
 
 
 def server_fn(fractional_fit, num_rounds):
     """Construct components that set the ServerApp behaviour."""
-
+    print("Starting Server Function 1")
     # Let's define the global model and pass it to the strategy
     parameters = ndarrays_to_parameters(load_model().get_weights())
-
+    print(f"Server Function: Parameters: {type(parameters)}")
     # Define the strategy
     strategy = FedAvg(
         fraction_fit=fractional_fit,
@@ -30,6 +33,7 @@ def server_fn(fractional_fit, num_rounds):
         initial_parameters=parameters,
         evaluate_metrics_aggregation_fn=weighted_average,
     )
+    print(f"Server Function: Weights: {type(load_model().get_weights())} \nLength: {len(load_model().get_weights())}")
     # Read from config
     config = ServerConfig(num_rounds=num_rounds)
 

@@ -44,12 +44,18 @@ def load_data(partition_id, num_partitions):
             dataset="uoft-cs/cifar10",
             partitioners={"train": partitioner},
         )
+        print(f"Loaded Federated Dataset. Type: {type(fds)}")
     partition = fds.load_partition(partition_id, "train")
     partition.set_format("numpy")
+    print(f"Created Partitions. Type: {type(partition)}")
 
     # Divide data on each node: 80% train, 20% test
     partition = partition.train_test_split(test_size=0.2)
     x_train, y_train = partition["train"]["img"] / 255.0, partition["train"]["label"]
     x_test, y_test = partition["test"]["img"] / 255.0, partition["test"]["label"]
+    print(f"Dataset Format. \nX_Train Type: {type(x_train)} Length: {len(x_train)}")
+    print(f"Dataset Format. \nY_Train Type: {type(y_train)} Length: {len(y_train)}")
+    print(f"Dataset Format. \nX_Test Type: {type(x_test)} Length: {len(x_test)}")
+    print(f"Dataset Format. \nY_Test Type: {type(y_test)} Length: {len(y_test)}")
 
     return x_train, y_train, x_test, y_test
