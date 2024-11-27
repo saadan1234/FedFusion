@@ -15,7 +15,7 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
 def server_fn(fractional_fit, num_rounds):
     """Construct components that set the ServerApp behaviour."""
     # Let's define the global model and pass it to the strategy
-    parameters = ndarrays_to_parameters(load_model().get_weights())
+    parameters = ndarrays_to_parameters(load_model(learning_rate=0.001, input_shape=(32,32,3), datatype="Image").get_weights())
     # Define the strategy
     strategy = FedAdam(
         fraction_fit=fractional_fit,

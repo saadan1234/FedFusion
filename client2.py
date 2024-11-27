@@ -5,13 +5,13 @@ from task import load_data, load_model
 class FlowerClient(NumPyClient):
     def __init__(
         self,
-        learning_rate,
+        model,
         data,
         epochs,
         batch_size,
         verbose,
     ):
-        self.model = load_model(learning_rate)
+        self.model=model
         self.x_train, self.y_train, self.x_test, self.y_test = data
         self.epochs = epochs
         self.batch_size = batch_size
@@ -36,25 +36,17 @@ class FlowerClient(NumPyClient):
         return loss, len(self.x_test), {"accuracy": accuracy}
 
 
-def client_fn(partition_id, num_partitions, local_epochs, batch_size, learning_rate):
+def client_fn(partition_id, num_partitions, datatype, input_shape, local_epochs, batch_size, learning_rate):
     """Construct a Client that will be run in a ClientApp."""
     # Read the node_config to fetch data partition associated to this node
-    partition_id = partition_id
-    num_partitions = num_partitions
-    data = load_data(partition_id, num_partitions)
-
-    # Read run_config to fetch hyperparameters relevant to this run
-    epochs = local_epochs
-    batch_size = batch_size
-    verbose = 1
-    learning_rate = learning_rate
-
+    data = load_data(partition_id, num_partitions, datatype)
+    model = load_model(learning_rate, input_shape, datatype)
     # Return Client instance
-    return FlowerClient(learning_rate, data, epochs, batch_size, verbose).to_client()
+    return FlowerClient(model, data, local_epochs, batch_size, verbose=1).to_client()
 
 
 if __name__ == "__main__":
-    client = client_fn(partition_id=0, num_partitions=2, local_epochs=2, batch_size=32, learning_rate=0.1)
+    client = client_fn(partition_id=1, num_partitions=2, datatype='Image', input_shape=(32,32,3), local_epochs=2, batch_size=32, learning_rate=0.1)
     start_client(
         server_address='127.0.0.1:8080',
         client=client
