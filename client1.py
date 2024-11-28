@@ -34,6 +34,9 @@ def prepare_client_data(dataset_name, dataset_type, input_column, output_column,
     tokenizer = None
     if dataset_type == "text":
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+        tokenizer.add_special_tokens({"unk_token": "<UNK>"}) 
+
+
 
     # Load and preprocess the dataset
     dataset = load_dataset_hf(

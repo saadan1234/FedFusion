@@ -75,15 +75,15 @@ class CustomFedAvg(FedAvg):
 
     def build_and_save_model(self, input_shape, num_classes, model_type="dense"):
         """
-        Builds a model based on the dataset's requirements.
-        
-        Parameters:
-        - `input_shape`: Shape of the input data.
-        - `num_classes`: Number of output classes.
-        - `model_type`: Type of model to build (e.g., dense, LSTM).
+        Builds a model based on the dataset's requirements and initializes original weights.
         """
         self.model = build_model(input_shape, num_classes, model_type)
+        if self.model is None:
+            raise RuntimeError("Model building failed. Ensure `build_model` is correctly implemented.")
         self.original_weights = self.model.get_weights()
+        if not self.original_weights:
+            raise RuntimeError("Failed to initialize model weights. Ensure the model is compiled properly.")
+
 
     def initialize_parameters(self, client_manager: ClientManager):
         """
@@ -98,22 +98,18 @@ class CustomFedAvg(FedAvg):
 
     def _encrypt_params(self, ndarrays: NDArrays) -> Parameters:
         """
-        Encrypts model parameters using AES encryption.
-        
-        Parameters:
-        - `ndarrays`: Model weights as numpy arrays.
-        
-        Returns:
-        - Encrypted model parameters.
+        Encrypts model parameters using AES encryption and logs the encryption process.
         """
-        return Parameters(
-            tensors=[RsaCryptoAPI.encrypt_numpy_array(self.aes_key, arr) for arr in ndarrays],
-            tensor_type="",
-        )
+        print(f"Encrypting {len(ndarrays)} parameters for secure communication...")
+        encrypted = [
+            RsaCryptoAPI.encrypt_numpy_array(self.aes_key, arr) for arr in ndarrays
+        ]
+        print(f"Encryption successful. Number of encrypted tensors: {len(encrypted)}")
+        return Parameters(tensors=encrypted, tensor_type="")
 
     def _decrypt_params(self, parameters: Parameters) -> NDArrays:
         """
-        Decrypts model parameters received from clients.
+        Decrypts model parameters received from clients and validates the parameter count.
         
         Parameters:
         - `parameters`: Encrypted model parameters.
@@ -121,11 +117,24 @@ class CustomFedAvg(FedAvg):
         Returns:
         - Decrypted model weights as numpy arrays.
         """
-        return [
-            RsaCryptoAPI.decrypt_numpy_array(self.aes_key, param, dtype=self.original_weights[i].dtype)
-            .reshape(self.original_weights[i].shape)
-            for i, param in enumerate(parameters.tensors)
-        ]
+        num_received = len(parameters.tensors)
+        num_expected = len(self.original_weights)
+
+        if num_received != num_expected:
+            raise ValueError(
+                f"Mismatch in parameter count: received {num_received}, expected {num_expected}."
+            )
+
+        decrypted_params = []
+        for i, param in enumerate(parameters.tensors):
+            decrypted_param = RsaCryptoAPI.decrypt_numpy_array(
+                self.aes_key,
+                param,
+                dtype=self.original_weights[i].dtype  # Ensure dtype matches
+            ).reshape(self.original_weights[i].shape)
+            decrypted_params.append(decrypted_param)
+
+        return decrypted_params
 
     def configure_fit(self, server_round: int, parameters: Parameters, client_manager: ClientManager):
         """
@@ -160,45 +169,62 @@ class CustomFedAvg(FedAvg):
 
     def aggregate_fit(self, server_round: int, results, failures):
         """
-        Aggregates training results from clients securely.
-        
-        - Decrypts client updates.
-        - Aggregates updates and encrypts aggregated result.
+        Aggregates training results from clients securely, handles incomplete responses.
         """
-        decrypted_updates = [
-            (self._decrypt_params(fit_res.parameters), fit_res.num_examples)
-            for _, fit_res in results
-        ]
+        if not results:
+            print(f"No results received in round {server_round}. Skipping aggregation.")
+            return self._encrypt_params(self.model.get_weights()), {}
+
+        print(f"Received results from {len(results)} clients. Processing updates...")
+        decrypted_updates = []
+        for client_id, fit_res in results:
+            try:
+                decrypted_updates.append(
+                    (self._decrypt_params(fit_res.parameters), fit_res.num_examples)
+                )
+            except ValueError as e:
+                print(f"Error decrypting parameters from client {client_id}: {e}")
+                continue  # Skip this client
+
+        if not decrypted_updates:
+            print(f"No valid updates received in round {server_round}.")
+            return self._encrypt_params(self.model.get_weights()), {}
+
         aggregated_update = aggregate(decrypted_updates)
         encrypted_params = self._encrypt_params(aggregated_update)
         return encrypted_params, {}
 
+
     def aggregate_evaluate(self, server_round: int, results, failures):
         """
-        Aggregates evaluation results from clients and updates metrics.
-        
-        - Computes smoothed accuracy using momentum.
-        - Logs and tracks performance metrics for each round.
+        Aggregates evaluation results from clients and tracks metrics.
         """
         result = super().aggregate_evaluate(server_round, results, failures)
 
-        if result:
-            loss_value, metrics_data = result
-            current_accuracy = metrics_data["accuracy"]
-            smoothed_accuracy = (
-                self.momentum * self.previous_accuracy + (1 - self.momentum) * current_accuracy
-                if self.previous_accuracy is not None
-                else current_accuracy
-            )
-            self.previous_accuracy = smoothed_accuracy
-
-            # Store metrics
+        if not results:
+            print(f"No evaluation results received in round {server_round}.")
             metrics["rounds"].append(server_round)
-            metrics["loss"].append(loss_value)
-            metrics["accuracy"].append(smoothed_accuracy)
+            metrics["loss"].append(None)
+            metrics["accuracy"].append(None)
+            return result
 
-            print(f"Round {server_round}: Loss = {loss_value}, Smoothed Accuracy = {smoothed_accuracy}")
+        loss_value, metrics_data = result
+        current_accuracy = metrics_data.get("accuracy", 0.0)
+        smoothed_accuracy = (
+            self.momentum * self.previous_accuracy + (1 - self.momentum) * current_accuracy
+            if self.previous_accuracy is not None
+            else current_accuracy
+        )
+        self.previous_accuracy = smoothed_accuracy
+
+        # Store metrics
+        metrics["rounds"].append(server_round)
+        metrics["loss"].append(loss_value)
+        metrics["accuracy"].append(smoothed_accuracy)
+
+        print(f"Round {server_round}: Loss = {loss_value}, Smoothed Accuracy = {smoothed_accuracy}")
         return result
+
 
 def main():
     """

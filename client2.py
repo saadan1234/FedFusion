@@ -2,6 +2,7 @@ import numpy as np
 from transformers import AutoTokenizer
 from attacktutils import  create_gradient_leakage_client  # Custom client to simulate gradient leakage attacks
 from clientutils import (
+    create_flower_client,
     load_config,  # Loads configuration from a YAML file
     load_dataset_hf,  # Load dataset from Hugging Face or local sources
     prepare_data,  # Preprocess the dataset according to the task requirements
@@ -100,9 +101,13 @@ def start_flower_client(client_id, input_shape, num_classes, model_type, client_
 
     # Create the model
     print(f"Initializing Client {client_id}")
-    client = create_gradient_leakage_client(
-        input_shape, num_classes, model_type, X_client_train, Y_client_train, X_client_test, Y_client_test
-    )
+   #  client = create_gradient_leakage_client(
+   #      input_shape, num_classes, model_type, X_client_train, Y_client_train, X_client_test, Y_client_test
+   #  )
+    client = create_flower_client(
+         input_shape, num_classes, model_type, X_client_train, Y_client_train, X_client_test, Y_client_test
+      )
+
 
     # Start Flower client
     print(f"Starting Client {client_id}")

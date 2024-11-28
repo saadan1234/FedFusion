@@ -23,35 +23,65 @@ from crypto.rsa_crypto import RsaCryptoAPI
 import tensorflow as tf
 import numpy as np
 
-def build_model(input_shape, num_classes, model_type='dense'):
+def build_model(input_shape, num_classes, model_type='dense', vocab_size=20000):
     """
-    Build a Keras model.
+    Build and compile a Keras model.
 
     Args:
-        input_shape: Shape of the input data.
+        input_shape: Shape of the input data (for images or numeric data).
         num_classes: Number of output classes.
-        model_type: Type of model to build ('dense' or 'lstm').
+        model_type: Type of model to build ('dense', 'image', or 'text').
+        vocab_size: Size of the vocabulary (required for 'text' model).
 
     Returns:
         A compiled Keras model.
     """
-    if model_type == 'dense':
+    if model_type == 'image':
+        base_model = tf.keras.applications.MobileNetV2(
+            input_shape=(input_shape[0], input_shape[1], 3),  # Assuming RGB images
+            include_top=False,
+            weights='imagenet'
+        )
+        base_model.trainable = False  # Freeze the base model to use it as a feature extractor
         model = tf.keras.Sequential([
-            tf.keras.layers.Dense(128, activation='relu', input_shape=(input_shape,)),
+            base_model,
+            tf.keras.layers.GlobalAveragePooling2D(),
             tf.keras.layers.Dense(64, activation='relu'),
             tf.keras.layers.Dense(num_classes, activation='softmax')
         ])
-    elif model_type == 'lstm':
+        loss = 'sparse_categorical_crossentropy' if num_classes > 1 else 'binary_crossentropy'
+    
+    elif model_type == 'dense':
         model = tf.keras.Sequential([
-            tf.keras.layers.LSTM(128, input_shape=(input_shape, 1), return_sequences=False),
-            tf.keras.layers.Dense(64, activation='relu'),
+            tf.keras.layers.Dense(64, activation='relu', input_shape=(input_shape,)),
+            tf.keras.layers.Dropout(0.2),  # Helps with regularization
+            tf.keras.layers.Dense(32, activation='relu'),
             tf.keras.layers.Dense(num_classes, activation='softmax')
         ])
+        loss = 'sparse_categorical_crossentropy' if num_classes > 1 else 'binary_crossentropy'
+    
+    elif model_type == 'text':
+        if vocab_size is None:
+            raise ValueError("vocab_size must be specified for 'text' models.")
+        model = tf.keras.Sequential([
+            tf.keras.layers.Embedding(input_dim=vocab_size, output_dim=128, input_shape=(input_shape,)),
+            tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(64, return_sequences=False)),
+            tf.keras.layers.Dense(32, activation='relu'),
+            tf.keras.layers.Dense(num_classes, activation='softmax')
+        ])
+        loss = 'sparse_categorical_crossentropy' if num_classes > 1 else 'binary_crossentropy'
+    
     else:
-        raise ValueError("Unsupported model type. Choose 'dense' or 'lstm'.")
+        raise ValueError("Unsupported model type. Choose 'dense', 'image', or 'text'.")
 
-    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    # Compilation
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss=loss,
+        metrics=['accuracy']
+    )
     return model
+
 
 def create_flower_client(input_shape, num_classes, model_type, X_train, Y_train, X_test, Y_test):
     """
@@ -232,7 +262,10 @@ def prepare_data(dataset, tokenizer=None, input_col=None, output_col=None, datas
     """
     if dataset_type == 'text':
         def tokenize_function(examples):
-            return tokenizer(examples[input_col], truncation=True, padding='max_length')
+            vocab_size = 20000
+            tokenized = tokenizer(examples[input_col], truncation=True, padding='max_length')
+            tokenized["input_ids"] = np.clip(tokenized["input_ids"], 0, vocab_size - 1)  # Ensure valid vocab range
+            return tokenized
         dataset = dataset.map(tokenize_function, batched=True)
     elif dataset_type == 'traditional':
         def process_features(example):
