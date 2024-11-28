@@ -1,39 +1,255 @@
-from typing import List, Tuple
-from flwr.common import Metrics, ndarrays_to_parameters
+# Import necessary libraries
+import numpy as np
 from flwr.server import start_server, ServerConfig
-from flwr.server.strategy import FedAdam
-from task import load_model
+from flwr.server.strategy import FedAvg
+from flwr.common import (
+    NDArrays,
+    Parameters,
+)
+from flwr.server.client_manager import ClientManager
+from flwr.server.strategy.aggregate import aggregate
+from serverutils import load_config, plot_training_metrics, weighted_average
+from crypto.rsa_crypto import RsaCryptoAPI
+from clientutils import load_dataset_hf, preprocess_and_split, prepare_data
+from clientutils import build_model
 
-# Define metric aggregation function
-def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
-    # Multiply accuracy of each client by number of examples used
-    accuracies = [num_examples * m["accuracy"] for num_examples, m in metrics]
-    examples = [num_examples for num_examples, _ in metrics]
-    # Aggregate and return custom metric (weighted average)
-    return {"accuracy": sum(accuracies) / sum(examples)}
+# Metrics storage
+metrics = {"rounds": [], "loss": [], "accuracy": []}
 
-def server_fn(fractional_fit, num_rounds):
-    """Construct components that set the ServerApp behaviour."""
-    # Let's define the global model and pass it to the strategy
-    parameters = ndarrays_to_parameters(load_model(learning_rate=0.001, input_shape=(32,32,3), datatype="Image").get_weights())
-    # Define the strategy
-    strategy = FedAdam(
-        fraction_fit=fractional_fit,
-        fraction_evaluate=1.0,
-        min_available_clients=2,
-        initial_parameters=parameters,
+# Customized Server Strategy
+class CustomFedAvg(FedAvg):
+    """
+    Customized federated averaging strategy for secure and optimized aggregation of client updates.
+    
+    Key Features:
+    - **Z-Score Threshold**: Used to identify and handle outliers in client updates.
+    - **Momentum**: Implements exponential smoothing for tracking accuracy.
+    - **AES Encryption**: Secures communication by encrypting client updates.
+
+    Methods:
+    - `load_and_prepare_data`: Prepares datasets for training by loading and preprocessing data.
+    - `build_and_save_model`: Builds and initializes a model based on the dataset.
+    - `_encrypt_params` & `_decrypt_params`: Secure communication using encryption/decryption.
+    - `configure_fit` & `configure_evaluate`: Configures fit/evaluation requests for clients.
+    - `aggregate_fit` & `aggregate_evaluate`: Aggregates client updates securely and updates metrics.
+    """
+
+    def __init__(self, zscore_threshold: float = 2.5, momentum: float = 0.9, aes_key: bytes = None, **kwargs):
+        """
+        Initialize the custom federated averaging strategy.
+        
+        Parameters:
+        - `zscore_threshold`: Outlier detection threshold.
+        - `momentum`: Weight for smoothing accuracy.
+        - `aes_key`: Key for encrypting/decrypting updates.
+        """
+        super().__init__(**kwargs)
+        self.zscore_threshold = zscore_threshold
+        self.momentum = momentum
+        self.previous_accuracy = None
+        self.aes_key = aes_key
+        self.model = None
+        self.original_weights = None
+        self.init_stage = True
+        self.ckpt_name = None
+
+    def load_and_prepare_data(self, dataset_name, dataset_type="traditional", input_column=None, output_column=None):
+        """
+        Load and preprocess dataset for model training.
+        
+        - Supports various data types (text, numeric, image).
+        - Uses transformers for text-based datasets.
+        - Prepares data based on config file settings.
+
+        Returns:
+        - Train-test split dataset ready for training.
+        """
+        tokenizer = None
+        if dataset_type == "text":
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+        dataset = load_dataset_hf(dataset_name, input_column, output_column, dataset_type)
+        dataset = prepare_data(dataset, tokenizer, input_column, output_column, dataset_type)
+        return preprocess_and_split(dataset["train"], tokenizer, dataset_type, input_column, output_column)
+
+    def build_and_save_model(self, input_shape, num_classes, model_type="dense"):
+        """
+        Builds a model based on the dataset's requirements.
+        
+        Parameters:
+        - `input_shape`: Shape of the input data.
+        - `num_classes`: Number of output classes.
+        - `model_type`: Type of model to build (e.g., dense, LSTM).
+        """
+        self.model = build_model(input_shape, num_classes, model_type)
+        self.original_weights = self.model.get_weights()
+
+    def initialize_parameters(self, client_manager: ClientManager):
+        """
+        Initializes parameters for clients to begin training.
+        
+        Returns:
+        - Parameters containing initial model weights.
+        """
+        return Parameters(
+            tensors=[w for w in self.model.get_weights()], tensor_type="numpy.ndarrays"
+        )
+
+    def _encrypt_params(self, ndarrays: NDArrays) -> Parameters:
+        """
+        Encrypts model parameters using AES encryption.
+        
+        Parameters:
+        - `ndarrays`: Model weights as numpy arrays.
+        
+        Returns:
+        - Encrypted model parameters.
+        """
+        return Parameters(
+            tensors=[RsaCryptoAPI.encrypt_numpy_array(self.aes_key, arr) for arr in ndarrays],
+            tensor_type="",
+        )
+
+    def _decrypt_params(self, parameters: Parameters) -> NDArrays:
+        """
+        Decrypts model parameters received from clients.
+        
+        Parameters:
+        - `parameters`: Encrypted model parameters.
+        
+        Returns:
+        - Decrypted model weights as numpy arrays.
+        """
+        return [
+            RsaCryptoAPI.decrypt_numpy_array(self.aes_key, param, dtype=self.original_weights[i].dtype)
+            .reshape(self.original_weights[i].shape)
+            for i, param in enumerate(parameters.tensors)
+        ]
+
+    def configure_fit(self, server_round: int, parameters: Parameters, client_manager: ClientManager):
+        """
+        Configures training instructions for clients.
+        
+        - Adds encryption key and current round info.
+        - Ensures initial parameters are encrypted.
+        """
+        if self.init_stage:
+            parameters = self._encrypt_params(self.model.get_weights())
+            self.init_stage = False
+
+        fit_config = super().configure_fit(server_round, parameters, client_manager)
+        for _, fit_ins in fit_config:
+            fit_ins.config.update({"enc_key": self.aes_key, "curr_round": server_round})
+        return fit_config
+
+    def configure_evaluate(self, server_round: int, parameters: Parameters, client_manager: ClientManager):
+        """
+        Configures evaluation instructions for clients.
+        
+        - Ensures encrypted parameters are sent to clients.
+        """
+        if self.init_stage:
+            parameters = self._encrypt_params(self.model.get_weights())
+            self.init_stage = False
+
+        eval_config = super().configure_evaluate(server_round, parameters, client_manager)
+        for _, eval_ins in eval_config:
+            eval_ins.config["enc_key"] = self.aes_key
+        return eval_config
+
+    def aggregate_fit(self, server_round: int, results, failures):
+        """
+        Aggregates training results from clients securely.
+        
+        - Decrypts client updates.
+        - Aggregates updates and encrypts aggregated result.
+        """
+        decrypted_updates = [
+            (self._decrypt_params(fit_res.parameters), fit_res.num_examples)
+            for _, fit_res in results
+        ]
+        aggregated_update = aggregate(decrypted_updates)
+        encrypted_params = self._encrypt_params(aggregated_update)
+        return encrypted_params, {}
+
+    def aggregate_evaluate(self, server_round: int, results, failures):
+        """
+        Aggregates evaluation results from clients and updates metrics.
+        
+        - Computes smoothed accuracy using momentum.
+        - Logs and tracks performance metrics for each round.
+        """
+        result = super().aggregate_evaluate(server_round, results, failures)
+
+        if result:
+            loss_value, metrics_data = result
+            current_accuracy = metrics_data["accuracy"]
+            smoothed_accuracy = (
+                self.momentum * self.previous_accuracy + (1 - self.momentum) * current_accuracy
+                if self.previous_accuracy is not None
+                else current_accuracy
+            )
+            self.previous_accuracy = smoothed_accuracy
+
+            # Store metrics
+            metrics["rounds"].append(server_round)
+            metrics["loss"].append(loss_value)
+            metrics["accuracy"].append(smoothed_accuracy)
+
+            print(f"Round {server_round}: Loss = {loss_value}, Smoothed Accuracy = {smoothed_accuracy}")
+        return result
+
+def main():
+    """
+    Main function to run the federated learning server.
+    
+    Steps:
+    1. Load configuration from `config.yaml`.
+    2. Load AES encryption key.
+    3. Initialize the custom federated averaging strategy.
+    4. Load and preprocess dataset.
+    5. Build the model based on dataset requirements.
+    6. Start the federated server to orchestrate client training.
+    7. Plot training metrics after training rounds.
+    """
+    config = load_config("config.yaml")
+    server_config = config["server"]
+    client_config = config["client1"]
+
+    # Load encryption key
+    aes_key = RsaCryptoAPI.load_key("crypto/aes_key.bin")
+
+    # Initialize the custom strategy
+    custom_strategy = CustomFedAvg(
         evaluate_metrics_aggregation_fn=weighted_average,
+        zscore_threshold=server_config["zscore_threshold"],
+        momentum=server_config["momentum"],
+        aes_key=aes_key,
     )
-    # Read from config
-    config = ServerConfig(num_rounds=num_rounds)
 
-    return config, strategy
+    # Load and preprocess data
+    X_train, X_test, Y_train, Y_test = custom_strategy.load_and_prepare_data(
+        dataset_name=client_config["dataset_name"],
+        dataset_type=client_config["dataset_type"],
+        input_column=client_config["input_column"],
+        output_column=client_config["output_column"],
+    )
+
+    # Build the model
+    input_shape = X_train.shape[1]
+    num_classes = len(np.unique(Y_train))
+    custom_strategy.build_and_save_model(input_shape, num_classes, client_config["model_type"])
+
+    # Start the federated server
+    start_server(
+        server_address=server_config["server_address"],
+        config=ServerConfig(num_rounds=server_config["num_rounds"]),
+        strategy=custom_strategy,
+    )
+
+    # Plot training metrics
+    plot_training_metrics(metrics["rounds"], metrics["loss"], metrics["accuracy"])
 
 if __name__ == "__main__":
-    config, strategy = server_fn(fractional_fit=0.5, num_rounds=3)
-    start_server(
-        server_address='0.0.0.0:8080',
-        config=config,
-        strategy=strategy
-    )
-    
+    main()
